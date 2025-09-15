@@ -1,77 +1,67 @@
 import network
 import urequests
 import utime
-from machine import Pin, ADC
+from machine import Pin
+from machine import time_pulse_us, ADC
 
-# ==== Blynk IoT credentials ====
-BLYNK_AUTH = "4AEf1vxK3Y9a4OQWJbGyEMo6NleJ5BfH"
-SSID = "VVIT Campus WIFI"
-PASSWORD = "91357924680"
+WIFI_SSID = "YourWiFiName"
+WIFI_PASS = "YourWiFiPassword"
 
-# ==== Pin Configuration ====
-TRIG = Pin(2, Pin.OUT)
-ECHO = Pin(3, Pin.IN)
-gas_sensor = ADC(Pin(26))  # MQ sensor analog output
+THINGSPEAK_API_KEY = "YOUR_WRITE_API_KEY"
+THINGSPEAK_URL = "https://api.thingspeak.com/update"
 
-# ==== Connect to Wi-Fi ====
-wifi = network.WLAN(network.STA_IF)
-wifi.active(True)
-wifi.connect(SSID, PASSWORD)
+TRIG = Pin(3, Pin.OUT)
+ECHO = Pin(2, Pin.IN)
 
-print("Connecting to WiFi...", end="")
-while not wifi.isconnected():
-    print(".", end="")
-    utime.sleep(0.5)
-print("\nConnected to WiFi:", wifi.ifconfig())
+gas_sensor = ADC(26)   # GPIO26 = ADC0
 
-# ==== Function to read distance from HC-SR04 ====
-def read_distance():
+buzzer = Pin(15, Pin.OUT)
+led = Pin(14, Pin.OUT)
+
+def connect_wifi():
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    wlan.connect(WIFI_SSID, WIFI_PASS)
+    while not wlan.isconnected():
+        print("Connecting to WiFi...")
+        utime.sleep(1)
+    print("Connected to WiFi:", wlan.ifconfig())
+
+def get_distance():
     TRIG.low()
     utime.sleep_us(2)
     TRIG.high()
     utime.sleep_us(10)
     TRIG.low()
+    duration = time_pulse_us(ECHO, 1, 30000)
+    distance = (duration * 0.0343) / 2
+    return distance
 
-    while ECHO.value() == 0:
-        signal_off = utime.ticks_us()
-    while ECHO.value() == 1:
-        signal_on = utime.ticks_us()
+def get_gas_ppm():
+    adc_value = gas_sensor.read_u16()
+    ppm = (adc_value / 65535) * 1000 
+    return ppm
 
-    time_passed = signal_on - signal_off
-    distance_cm = (time_passed * 0.0343) / 2
-    return round(distance_cm, 2)
-
-# ==== Main Loop ====
+connect_wifi()
 while True:
+    distance = get_distance()
+    gas_ppm = get_gas_ppm()
+
+    print("Water Level Distance: ", distance, "cm")
+    print("Gas Level: ", gas_ppm, "ppm")
+
+    if distance < 10 or gas_ppm > 400:
+        buzzer.value(1)
+        led.value(1)
+    else:
+        buzzer.value(0)
+        led.value(0)
+
     try:
-        # Read sensor values
-        distance = read_distance()
-        gas_raw = gas_sensor.read_u16()  # 0 - 65535
-        gas_percent = (gas_raw / 65535) * 100  # Convert to percentage
+        response = urequests.get(THINGSPEAK_URL + "&field1=" + str(distance) + "&field2=" + str(gas_ppm))
+        print("ThingSpeak response:", response.text)
+        response.close()
+    except:
+        print("Error sending to ThingSpeak")
 
-        print("Distance:", distance, "cm | Gas:", gas_percent, "%")
-
-        # Send data to Blynk (V0 = distance, V1 = gas %)
-        url_data = "https://blynk.cloud/external/api/update?token={}&V0={}&V1={}".format(
-            BLYNK_AUTH, distance, round(gas_percent, 2)
-        )
-        r = urequests.get(url_data)
-        r.close()
-
-        # Check alerts
-        if distance < 10:
-            alert_url = "https://blynk.cloud/external/api/notify?token={}&message={}".format(
-                BLYNK_AUTH, "⚠ Alert: Object too close! Distance = {}cm".format(distance)
-            )
-            urequests.get(alert_url).close()
-
-        if gas_percent > 80:
-            alert_url = "https://blynk.cloud/external/api/notify?token={}&message={}".format(
-                BLYNK_AUTH, "⚠ Alert: Gas level high! = {}%".format(round(gas_percent, 2))
-            )
-            urequests.get(alert_url).close()
-
-    except Exception as e:
-        print("Error:", e)
-
-    utime.sleep(2)  # Update every 2 seconds
+    utime.sleep(15)  
